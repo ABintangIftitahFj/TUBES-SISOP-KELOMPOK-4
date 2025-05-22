@@ -1,0 +1,348 @@
+// D:\ProyekFS\main.go (atau path proyekmu)
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"log"
+	"strings" // Import package strings
+	"time"    // For time formatting
+
+	"filesystemsimulator/filesystem_logic" // SESUAIKAN NAMA MODULMU
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/widget"
+)
+
+// Variabel global
+var fsInstance *filesystem_logic.FileSystem
+var currentEntries []filesystem_logic.DirectoryEntry
+var myWindow fyne.Window
+var currentPathString string = "/"       // Menyimpan path string saat ini, mulai dari root
+var pathLabel *widget.Label              // Jadikan pathLabel global agar mudah diupdate
+var fileListWidget *widget.List          // Jadikan fileListWidget global
+var selectedItemID widget.ListItemID = -1 // Track selected item ID
+
+// Fungsi untuk mengupdate global currentPathString setelah cd berhasil
+func updateGlobalPathString(targetName string) {
+	if targetName == "/" {
+		currentPathString = "/"
+		return
+	}
+
+	if targetName == ".." {
+		if currentPathString == "/" { // Jika sudah di root, ".." tidak mengubah path
+			return
+		}
+		lastSlash := strings.LastIndex(currentPathString, "/")
+		if lastSlash == 0 { // Contoh: dari "/folderA" menjadi "/"
+			currentPathString = "/"
+		} else if lastSlash > 0 { // Contoh: dari "/folderA/folderB" menjadi "/folderA"
+			currentPathString = currentPathString[:lastSlash]
+		}
+		return
+	}
+
+	if targetName == "." { // "." tidak mengubah path
+		return
+	}
+
+	// Menambahkan nama direktori baru ke path
+	if currentPathString == "/" {
+		currentPathString += targetName
+	} else {
+		currentPathString += "/" + targetName
+	}
+}
+
+// Fungsi untuk me-refresh tampilan daftar file dan path label
+func refreshUI() { // Menggantikan refreshFileList dan lebih fokus pada UI update
+	var err error
+	currentEntries, err = filesystem_logic.ListEntries(fsInstance.CurrentDirectoryBlock)
+	if err != nil {
+		dialog.ShowError(fmt.Errorf("gagal membaca direktori (Blok %d): %w", fsInstance.CurrentDirectoryBlock, err), myWindow)
+		currentEntries = []filesystem_logic.DirectoryEntry{}
+	}
+
+	// Update path label menggunakan global currentPathString
+	pathLabel.SetText(fmt.Sprintf("Current Path: %s (Blok %d)", currentPathString, fsInstance.CurrentDirectoryBlock))
+
+	fileListWidget.Refresh() // Memberitahu Fyne untuk merender ulang list widget
+}
+
+// Function to read and display file content
+func fileContentDialog(entry filesystem_logic.DirectoryEntry) {
+	fileName := string(entry.Name[:bytes.IndexByte(entry.Name[:], 0)])
+	data, err := filesystem_logic.ReadFromFile(entry)
+	if err != nil {
+		dialog.ShowError(err, myWindow)
+		return
+	}
+	
+	// Create dialog for viewing and editing file content
+	contentEntry := widget.NewMultiLineEntry()
+	contentEntry.SetText(string(data))
+	
+	// Show dialog with file content and save button
+	fileDialog := dialog.NewCustom("File: "+fileName, "Close", container.NewBorder(
+		nil,
+		container.NewHBox(
+			widget.NewButton("Save Changes", func() {
+				// Save file content
+				newData := []byte(contentEntry.Text)
+				err := filesystem_logic.WriteToFile(&entry, fsInstance.CurrentDirectoryBlock, newData)
+				if err != nil {
+					dialog.ShowError(err, myWindow)
+				} else {
+					dialog.ShowInformation("Success", "File content saved successfully", myWindow)
+					fileDialog.Hide()
+					refreshUI()
+				}
+			}),
+		),
+		nil,
+		nil,
+		container.NewScroll(contentEntry),
+	), myWindow)
+	fileDialog.Resize(fyne.NewSize(500, 400))
+	fileDialog.Show()
+}
+
+func main() {
+	var err error
+	fsInstance, err = filesystem_logic.NewFileSystem()
+	if err != nil {
+		log.Fatalf("FATAL: Gagal inisialisasi File System: %v", err)
+	}
+	fmt.Println("File System Berhasil Diinisialisasi.")
+
+	myApp := app.New()
+	// Set a custom theme for Mac-like appearance
+	myApp.Settings().SetTheme(theme.DarkTheme())
+	
+	myWindow = myApp.NewWindow("Go File System Simulator")
+	myWindow.Resize(fyne.NewSize(800, 600))
+
+	// Inisialisasi widget global
+	pathLabel = widget.NewLabel("Path: " + currentPathString) // Inisialisasi awal dengan path global
+	pathLabel.TextStyle = fyne.TextStyle{Bold: true}
+	
+	// Create a styled header
+	headerBg := canvas.NewRectangle(theme.BackgroundColor())
+	headerContent := container.NewVBox(
+		pathLabel,
+	)
+	header := container.NewStack(headerBg, headerContent)
+
+	// --- Tombol UP (cd ..) ---
+	upButton := widget.NewButtonWithIcon("Up", theme.NavigateBackIcon(), func() {
+		fmt.Println("Tombol Up (..) ditekan.")
+		targetDirName := ".." // Nama direktori yang akan dioper ke ChangeDirectory dan updateGlobalPathString
+		errCd := filesystem_logic.ChangeDirectory(fsInstance, targetDirName)
+		if errCd != nil {
+			dialog.ShowError(errCd, myWindow)
+		} else {
+			updateGlobalPathString(targetDirName) // Update path string jika cd berhasil
+		}
+		refreshUI()
+	})
+
+	// --- Tombol MKDIR ---
+	mkdirButton := widget.NewButtonWithIcon("New Folder", theme.FolderNewIcon(), func() {
+		fmt.Println("Tombol New Folder ditekan.")
+		entryWidget := widget.NewEntry()
+		dialog.ShowForm("Create New Folder", "Create", "Cancel",
+			[]*widget.FormItem{
+				widget.NewFormItem("Folder Name", entryWidget),
+			},
+			func(buat bool) {
+				if !buat || entryWidget.Text == "" {
+					fmt.Println("Pembuatan direktori dibatalkan atau nama kosong.")
+					return
+				}
+				dirName := entryWidget.Text
+				fmt.Printf("Mencoba membuat direktori: %s\n", dirName)
+				errMkdir := filesystem_logic.CreateDirectory(fsInstance.CurrentDirectoryBlock, dirName)
+				if errMkdir != nil {
+					dialog.ShowError(errMkdir, myWindow)
+				} else {
+					dialog.ShowInformation("Success", "Folder '"+dirName+"' has been created.", myWindow)
+				}
+				refreshUI()
+			}, myWindow)
+	})
+	
+	// --- Tombol CREATE FILE ---
+	createFileButton := widget.NewButtonWithIcon("New File", theme.DocumentCreateIcon(), func() {
+		fmt.Println("Tombol Create File ditekan.")
+		entryWidget := widget.NewEntry()
+		dialog.ShowForm("Create New File", "Create", "Cancel",
+			[]*widget.FormItem{
+				widget.NewFormItem("File Name", entryWidget),
+			},
+			func(buat bool) {
+				if !buat || entryWidget.Text == "" {
+					fmt.Println("Pembuatan file dibatalkan atau nama kosong.")
+					return
+				}
+				fileName := entryWidget.Text
+				fmt.Printf("Mencoba membuat file: %s\n", fileName)
+				errCreateFile := filesystem_logic.CreateFile(fsInstance.CurrentDirectoryBlock, fileName)
+				if errCreateFile != nil {
+					dialog.ShowError(errCreateFile, myWindow)
+				} else {
+					dialog.ShowInformation("Success", "File '"+fileName+"' has been created.", myWindow)
+				}
+				refreshUI()
+			}, myWindow)
+	})
+
+	// --- Tombol DELETE ---
+	deleteButton := widget.NewButtonWithIcon("Delete", theme.DeleteIcon(), func() {
+		if selectedItemID < 0 || selectedItemID >= len(currentEntries) {
+			dialog.ShowInformation("Info", "Select an item to delete first", myWindow)
+			return
+		}
+		
+		selectedEntry := currentEntries[selectedItemID]
+		entryName := string(selectedEntry.Name[:bytes.IndexByte(selectedEntry.Name[:], 0)])
+		
+		if entryName == "." || entryName == ".." {
+			dialog.ShowInformation("Cannot Delete", "Cannot delete '.' or '..' special directories", myWindow)
+			return
+		}
+		
+		// Show confirmation dialog
+		entryType := "file"
+		if selectedEntry.Type == filesystem_logic.TYPE_DIRECTORY {
+			entryType = "folder"
+		}
+		dialog.ShowConfirm(
+			"Delete "+entryType,
+			fmt.Sprintf("Are you sure you want to delete %s '%s'?", entryType, entryName),
+			func(confirmed bool) {
+				if confirmed {
+					err := filesystem_logic.DeleteEntry(fsInstance.CurrentDirectoryBlock, entryName)
+					if err != nil {
+						dialog.ShowError(err, myWindow)
+					} else {
+						refreshUI()
+						selectedItemID = -1 // Reset selection after deletion
+					}
+				}
+			},
+			myWindow,
+		)
+	})
+
+	// --- List Widget ---
+	fileListWidget = widget.NewList(
+		func() int { return len(currentEntries) },
+		func() fyne.CanvasObject {
+			return container.NewHBox(
+				widget.NewIcon(nil),
+				widget.NewLabel("Template"),
+				widget.NewLabel(""),  // For file size
+				widget.NewLabel(""),  // For modification time
+			)
+		},
+		func(id widget.ListItemID, item fyne.CanvasObject) {
+			if id < 0 || id >= len(currentEntries) { return }
+			entry := currentEntries[id]
+			idx := bytes.IndexByte(entry.Name[:], 0)
+			var name string
+			if idx == -1 { name = string(entry.Name[:]) } else { name = string(entry.Name[:idx]) }
+			
+			hbox := item.(*fyne.Container)
+			icon := hbox.Objects[0].(*widget.Icon)
+			nameLabel := hbox.Objects[1].(*widget.Label)
+			sizeLabel := hbox.Objects[2].(*widget.Label) 
+			timeLabel := hbox.Objects[3].(*widget.Label)
+			
+			if entry.Type == filesystem_logic.TYPE_DIRECTORY {
+				icon.SetResource(theme.FolderIcon())
+				nameLabel.SetText(name + "/")
+				sizeLabel.SetText("Directory")
+			} else {
+				icon.SetResource(theme.FileIcon())
+				nameLabel.SetText(name)
+				sizeLabel.SetText(fmt.Sprintf("%d bytes", entry.Size))
+			}
+			
+			// Format modification time
+			unixTime := entry.ModTime / 1e9 // Convert nanoseconds to seconds
+			timeStr := fmt.Sprintf("Modified: %s", time.Unix(unixTime, 0).Format("2006-01-02 15:04:05"))
+			timeLabel.SetText(timeStr)
+		},
+	)
+
+	fileListWidget.OnSelected = func(id widget.ListItemID) {
+		if id < 0 || id >= len(currentEntries) { return }
+		
+		selectedItemID = id // Store the selected ID globally
+		selectedEntry := currentEntries[id]
+		targetDirName := string(selectedEntry.Name[:bytes.IndexByte(selectedEntry.Name[:], 0)])
+		fmt.Printf("Item dipilih: %s, Tipe: %d\n", targetDirName, selectedEntry.Type)
+
+		// Don't immediately navigate for directories - just select
+		if selectedEntry.Type == filesystem_logic.TYPE_FILE {
+			// Open file content dialog
+			fileContentDialog(selectedEntry)
+			fileListWidget.UnselectAll()
+			selectedItemID = -1
+		}
+	}
+	
+	// Double click to navigate into directories
+	fileListWidget.OnDoubleTapped = func(pe *fyne.PointEvent) {
+		if selectedItemID < 0 || selectedItemID >= len(currentEntries) {
+			return
+		}
+		
+		selectedEntry := currentEntries[selectedItemID]
+		if selectedEntry.Type == filesystem_logic.TYPE_DIRECTORY {
+			targetDirName := string(selectedEntry.Name[:bytes.IndexByte(selectedEntry.Name[:], 0)])
+			errCd := filesystem_logic.ChangeDirectory(fsInstance, targetDirName)
+			if errCd != nil {
+				dialog.ShowError(errCd, myWindow)
+			} else {
+				updateGlobalPathString(targetDirName) // Update path string jika cd berhasil
+			}
+			refreshUI()
+			fileListWidget.UnselectAll()
+			selectedItemID = -1 // Reset selection after navigating
+		}
+	}
+
+	// Toolbar with buttons
+	toolbar := container.New(layout.NewHBoxLayout(),
+		upButton,
+		widget.NewSeparator(),
+		mkdirButton,
+		createFileButton,
+		widget.NewSeparator(),
+		deleteButton,
+	)
+
+	// Susun Layout
+	content := container.NewBorder(
+		container.NewVBox(header, toolbar), // top
+		nil, // bottom
+		nil, // left 
+		nil, // right
+		container.NewPadded(fileListWidget), // center
+	)
+
+	// Panggil refreshUI pertama kali
+	refreshUI()
+
+	myWindow.SetContent(content)
+	myWindow.SetMaster()
+	myWindow.ShowAndRun()
+}
