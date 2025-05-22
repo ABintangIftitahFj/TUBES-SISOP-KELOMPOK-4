@@ -85,10 +85,12 @@ Aplikasi menyediakan antarmuka grafis yang intuitif dengan:
 
 - [Nama Mahasiswa]
 - [NIM]
+![image](https://github.com/user-attachments/assets/d177dcdd-8f95-4d06-8ba9-d94d65ae35d8)
+
 
 ## Mata Kuliah
 
-Sistem Operasi - Semester 4
+Sistem Operasi  - Semester 4
 
 ---
 
